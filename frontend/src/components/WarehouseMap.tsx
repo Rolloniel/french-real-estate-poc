@@ -7,11 +7,22 @@ import {
   Marker,
   Popup,
   Circle,
+  GeoJSON,
   useMapEvents,
 } from "react-leaflet";
 import L from "leaflet";
-import { Warehouse, NearbyWarehouse, WarehouseFilters } from "@/lib/types";
-import { fetchWarehouses, fetchNearbyWarehouses } from "@/lib/api";
+import type { Feature, FeatureCollection, Geometry } from "geojson";
+import {
+  Warehouse,
+  NearbyWarehouse,
+  WarehouseFilters,
+  DepartmentHeatmapStat,
+} from "@/lib/types";
+import {
+  fetchWarehouses,
+  fetchNearbyWarehouses,
+  fetchDepartmentStats,
+} from "@/lib/api";
 import { formatEur, formatSurface, formatDate } from "@/lib/format";
 import "leaflet/dist/leaflet.css";
 
@@ -45,14 +56,247 @@ const CenterIcon = L.icon({
 const FRANCE_CENTER: [number, number] = [46.6, 2.3];
 const FRANCE_ZOOM = 6;
 
+const GEOJSON_URL =
+  "https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/departements.geojson";
+
 interface WarehouseMapProps {
   filters: WarehouseFilters;
   onResultCount: (count: number) => void;
 }
 
 /** Helper to check if a warehouse-like object has a distance_km field */
-function isNearbyWarehouse(w: Warehouse | NearbyWarehouse): w is NearbyWarehouse {
+function isNearbyWarehouse(
+  w: Warehouse | NearbyWarehouse
+): w is NearbyWarehouse {
   return "distance_km" in w;
+}
+
+// ---------------------------------------------------------------------------
+// Heatmap helpers
+// ---------------------------------------------------------------------------
+
+/** Color scale: green (cheap) -> yellow -> red (expensive) */
+function priceToColor(value: number, min: number, max: number): string {
+  if (max === min) return "#22c55e";
+  const t = Math.min(1, Math.max(0, (value - min) / (max - min)));
+  let r: number, g: number, b: number;
+  if (t < 0.5) {
+    const s = t * 2;
+    r = Math.round(34 + (234 - 34) * s);
+    g = Math.round(197 + (179 - 197) * s);
+    b = Math.round(94 + (8 - 94) * s);
+  } else {
+    const s = (t - 0.5) * 2;
+    r = Math.round(234 + (239 - 234) * s);
+    g = Math.round(179 + (68 - 179) * s);
+    b = Math.round(8 + (68 - 8) * s);
+  }
+  return `rgb(${r},${g},${b})`;
+}
+
+function formatPricePerM2(value: number): string {
+  return (
+    new Intl.NumberFormat("fr-FR", {
+      style: "currency",
+      currency: "EUR",
+      maximumFractionDigits: 0,
+    }).format(value) + "/m\u00B2"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+/** Floating legend for the heatmap */
+function HeatmapLegend({ min, max }: { min: number; max: number }) {
+  const steps = 6;
+  const labels: { color: string; label: string }[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const value = min + (max - min) * (i / steps);
+    labels.push({
+      color: priceToColor(value, min, max),
+      label: formatPricePerM2(Math.round(value)),
+    });
+  }
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        bottom: 30,
+        right: 10,
+        zIndex: 1000,
+        background: "rgba(15,23,42,0.9)",
+        borderRadius: 8,
+        padding: "10px 14px",
+        color: "#e2e8f0",
+        fontSize: 12,
+        lineHeight: "18px",
+        pointerEvents: "auto",
+        border: "1px solid rgba(148,163,184,0.2)",
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        Avg. Price / m&sup2;
+      </div>
+      {labels.map((l, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span
+            style={{
+              display: "inline-block",
+              width: 16,
+              height: 12,
+              backgroundColor: l.color,
+              borderRadius: 2,
+              flexShrink: 0,
+            }}
+          />
+          <span>{l.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Toggle button: Pins vs Heatmap */
+function ViewToggle({
+  mode,
+  onToggle,
+}: {
+  mode: "pins" | "heatmap";
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 10,
+        left: 60,
+        zIndex: 1000,
+        pointerEvents: "auto",
+      }}
+    >
+      <button
+        onClick={onToggle}
+        style={{
+          background: "rgba(15,23,42,0.9)",
+          color: "#e2e8f0",
+          border: "1px solid rgba(148,163,184,0.3)",
+          borderRadius: 6,
+          padding: "6px 14px",
+          fontSize: 13,
+          fontWeight: 500,
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+        }}
+      >
+        <span
+          style={{
+            display: "inline-block",
+            width: 8,
+            height: 8,
+            borderRadius: mode === "pins" ? "50%" : 2,
+            backgroundColor: mode === "pins" ? "#3b82f6" : "#ef4444",
+          }}
+        />
+        {mode === "pins" ? "Pins" : "Heatmap"}
+        <span style={{ opacity: 0.5, marginLeft: 2 }}>
+          {mode === "pins" ? "| Switch to Heatmap" : "| Switch to Pins"}
+        </span>
+      </button>
+    </div>
+  );
+}
+
+/** Choropleth GeoJSON layer coloured by department avg price per m2 */
+function ChoroplethLayer({
+  geojson,
+  deptStatsMap,
+  minPrice,
+  maxPrice,
+}: {
+  geojson: FeatureCollection;
+  deptStatsMap: Map<string, DepartmentHeatmapStat>;
+  minPrice: number;
+  maxPrice: number;
+}) {
+  const geoJsonRef = useRef<L.GeoJSON | null>(null);
+
+  const style = useCallback(
+    (feature: Feature<Geometry> | undefined) => {
+      if (!feature || !feature.properties) {
+        return {
+          fillColor: "#334155",
+          weight: 1,
+          color: "#475569",
+          fillOpacity: 0.3,
+        };
+      }
+      const code = feature.properties.code as string;
+      const stat = deptStatsMap.get(code);
+      if (!stat) {
+        return {
+          fillColor: "#334155",
+          weight: 1,
+          color: "#475569",
+          fillOpacity: 0.3,
+        };
+      }
+      return {
+        fillColor: priceToColor(stat.avg_price_per_m2, minPrice, maxPrice),
+        weight: 1,
+        color: "#94a3b8",
+        fillOpacity: 0.7,
+      };
+    },
+    [deptStatsMap, minPrice, maxPrice]
+  );
+
+  const onEachFeature = useCallback(
+    (feature: Feature<Geometry>, layer: L.Layer) => {
+      const code = feature.properties?.code as string;
+      const name = feature.properties?.nom as string;
+      const stat = deptStatsMap.get(code);
+
+      layer.on({
+        mouseover: (e: L.LeafletMouseEvent) => {
+          const target = e.target as L.Path;
+          target.setStyle({ weight: 3, color: "#fff", fillOpacity: 0.85 });
+          target.bringToFront();
+        },
+        mouseout: () => {
+          if (geoJsonRef.current) {
+            geoJsonRef.current.resetStyle();
+          }
+        },
+      });
+
+      const tooltipContent = stat
+        ? `<div style="font-size:13px;line-height:1.5">
+            <strong>${name} (${code})</strong><br/>
+            Avg: ${formatPricePerM2(stat.avg_price_per_m2)}<br/>
+            Warehouses: ${stat.total_count}
+          </div>`
+        : `<div style="font-size:13px"><strong>${name} (${code})</strong><br/>No data</div>`;
+
+      layer.bindTooltip(tooltipContent, { sticky: true, direction: "top" });
+    },
+    [deptStatsMap]
+  );
+
+  return (
+    <GeoJSON
+      ref={(ref) => {
+        geoJsonRef.current = ref;
+      }}
+      data={geojson}
+      style={style}
+      onEachFeature={onEachFeature}
+    />
+  );
 }
 
 /** Inner component to handle map click events */
@@ -73,21 +317,54 @@ function MapClickHandler({
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+
 export default function WarehouseMap({
   filters,
   onResultCount,
 }: WarehouseMapProps) {
-  const [warehouses, setWarehouses] = useState<(Warehouse | NearbyWarehouse)[]>(
-    []
-  );
+  const [warehouses, setWarehouses] = useState<
+    (Warehouse | NearbyWarehouse)[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Proximity search state
   const [proximityMode, setProximityMode] = useState(false);
-  const [centerPoint, setCenterPoint] = useState<[number, number] | null>(null);
+  const [centerPoint, setCenterPoint] = useState<[number, number] | null>(
+    null
+  );
   const [radiusKm, setRadiusKm] = useState(50);
+
+  // Heatmap state
+  const [viewMode, setViewMode] = useState<"pins" | "heatmap">("pins");
+  const [deptStats, setDeptStats] = useState<DepartmentHeatmapStat[]>([]);
+  const [geojson, setGeojson] = useState<FeatureCollection | null>(null);
+  const [heatmapLoaded, setHeatmapLoaded] = useState(false);
+
+  // Load heatmap data once (lazy — only when first switching to heatmap)
+  useEffect(() => {
+    if (viewMode !== "heatmap" || heatmapLoaded) return;
+
+    Promise.all([
+      fetchDepartmentStats().then((data) => data.items),
+      fetch(GEOJSON_URL).then((res) => {
+        if (!res.ok) throw new Error("Failed to load department boundaries");
+        return res.json() as Promise<FeatureCollection>;
+      }),
+    ])
+      .then(([stats, geo]) => {
+        setDeptStats(stats);
+        setGeojson(geo);
+        setHeatmapLoaded(true);
+      })
+      .catch((err) => {
+        console.error("Heatmap data error:", err);
+      });
+  }, [viewMode, heatmapLoaded]);
 
   const loadData = useCallback(
     (f: WarehouseFilters) => {
@@ -200,6 +477,15 @@ export default function WarehouseMap({
     (w) => w.latitude !== null && w.longitude !== null
   );
 
+  // Pre-compute heatmap derived values
+  const deptStatsMap = new Map(deptStats.map((d) => [d.department, d]));
+  const prices = deptStats.map((d) => d.avg_price_per_m2);
+  const minPrice = prices.length ? Math.min(...prices) : 0;
+  const maxPrice = prices.length ? Math.max(...prices) : 1;
+
+  const showPins = viewMode === "pins";
+  const showHeatmap = viewMode === "heatmap" && geojson !== null;
+
   return (
     <div className="relative h-full w-full">
       {/* Proximity search controls */}
@@ -225,7 +511,8 @@ export default function WarehouseMap({
             {centerPoint && (
               <>
                 <div className="mb-2 text-xs text-slate-400">
-                  Center: {centerPoint[0].toFixed(4)}, {centerPoint[1].toFixed(4)}
+                  Center: {centerPoint[0].toFixed(4)},{" "}
+                  {centerPoint[1].toFixed(4)}
                 </div>
                 <label className="mb-1 block text-xs text-slate-400">
                   Radius: {radiusKm} km
@@ -244,7 +531,8 @@ export default function WarehouseMap({
                   <span>200 km</span>
                 </div>
                 <div className="mt-2 text-xs text-slate-300">
-                  {mappable.length} warehouse{mappable.length !== 1 ? "s" : ""} found
+                  {mappable.length} warehouse{mappable.length !== 1 ? "s" : ""}{" "}
+                  found
                 </div>
               </>
             )}
@@ -264,6 +552,16 @@ export default function WarehouseMap({
         />
 
         <MapClickHandler enabled={proximityMode} onMapClick={handleMapClick} />
+
+        {/* Heatmap choropleth layer */}
+        {showHeatmap && (
+          <ChoroplethLayer
+            geojson={geojson!}
+            deptStatsMap={deptStatsMap}
+            minPrice={minPrice}
+            maxPrice={maxPrice}
+          />
+        )}
 
         {/* Proximity circle overlay */}
         {proximityMode && centerPoint && (
@@ -295,52 +593,68 @@ export default function WarehouseMap({
           </Marker>
         )}
 
-        {/* Warehouse markers */}
-        {mappable.map((w) => (
-          <Marker key={w.id} position={[w.latitude!, w.longitude!]}>
-            <Popup>
-              <div className="min-w-[200px] font-sans">
-                <p className="text-lg font-bold text-blue-700">
-                  {formatEur(w.price_eur)}
-                </p>
-                <hr className="my-1.5 border-slate-200" />
-                <table className="w-full text-sm">
-                  <tbody>
-                    {isNearbyWarehouse(w) && (
+        {/* Warehouse pin markers — hidden in heatmap mode */}
+        {showPins &&
+          mappable.map((w) => (
+            <Marker key={w.id} position={[w.latitude!, w.longitude!]}>
+              <Popup>
+                <div className="min-w-[200px] font-sans">
+                  <p className="text-lg font-bold text-blue-700">
+                    {formatEur(w.price_eur)}
+                  </p>
+                  <hr className="my-1.5 border-slate-200" />
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {isNearbyWarehouse(w) && (
+                        <tr>
+                          <td className="pr-3 text-slate-500">Distance</td>
+                          <td className="font-medium text-blue-600">
+                            {w.distance_km.toFixed(1)} km
+                          </td>
+                        </tr>
+                      )}
                       <tr>
-                        <td className="pr-3 text-slate-500">Distance</td>
-                        <td className="font-medium text-blue-600">
-                          {w.distance_km.toFixed(1)} km
+                        <td className="pr-3 text-slate-500">Surface</td>
+                        <td className="font-medium">
+                          {formatSurface(w.surface_m2)}
                         </td>
                       </tr>
-                    )}
-                    <tr>
-                      <td className="pr-3 text-slate-500">Surface</td>
-                      <td className="font-medium">
-                        {formatSurface(w.surface_m2)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td className="pr-3 text-slate-500">Commune</td>
-                      <td className="font-medium">{w.commune || "N/A"}</td>
-                    </tr>
-                    <tr>
-                      <td className="pr-3 text-slate-500">Department</td>
-                      <td className="font-medium">{w.department || "N/A"}</td>
-                    </tr>
-                    <tr>
-                      <td className="pr-3 text-slate-500">Date</td>
-                      <td className="font-medium">
-                        {formatDate(w.transaction_date)}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </Popup>
-          </Marker>
-        ))}
+                      <tr>
+                        <td className="pr-3 text-slate-500">Commune</td>
+                        <td className="font-medium">
+                          {w.commune || "N/A"}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="pr-3 text-slate-500">Department</td>
+                        <td className="font-medium">
+                          {w.department || "N/A"}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="pr-3 text-slate-500">Date</td>
+                        <td className="font-medium">
+                          {formatDate(w.transaction_date)}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </Popup>
+            </Marker>
+          ))}
       </MapContainer>
+
+      {/* View toggle (Pins / Heatmap) */}
+      <ViewToggle
+        mode={viewMode}
+        onToggle={() =>
+          setViewMode(viewMode === "pins" ? "heatmap" : "pins")
+        }
+      />
+
+      {/* Heatmap legend */}
+      {showHeatmap && <HeatmapLegend min={minPrice} max={maxPrice} />}
     </div>
   );
 }
