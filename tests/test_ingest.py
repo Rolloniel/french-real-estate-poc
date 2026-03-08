@@ -147,8 +147,24 @@ class TestFilterWarehouses:
         assert len(result) == 1
         assert result[0]["dvf_mutation_id"] == "1"
 
-    def test_filter_warehouses_limits_to_100(self):
-        """Verify filter returns max 100 qualifying warehouses."""
+    def test_filter_warehouses_limits_when_specified(self):
+        """Verify filter respects the limit parameter."""
+        rows = [
+            {
+                "id_mutation": str(i),
+                "type_local": "Local industriel. commercial ou assimilé",
+                "surface_reelle_bati": "15000",
+                "valeur_fonciere": "1000000",
+            }
+            for i in range(150)
+        ]
+
+        result = filter_warehouses(rows, limit=100)
+
+        assert len(result) == 100
+
+    def test_filter_warehouses_no_limit_returns_all(self):
+        """Verify filter returns all qualifying warehouses when no limit is set."""
         rows = [
             {
                 "id_mutation": str(i),
@@ -161,7 +177,7 @@ class TestFilterWarehouses:
 
         result = filter_warehouses(rows)
 
-        assert len(result) == 100
+        assert len(result) == 150
 
 
 class TestSkipNullValues:

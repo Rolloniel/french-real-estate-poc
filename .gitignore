@@ -8,3 +8,13 @@ dist/
 build/
 .sisyphus/
 cover_letter_draft.md
+
+# Gas Town (added by gt)
+.runtime/
+.claude/
+.logs/
+.beads/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db

@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-inter);
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* Leaflet popup overrides for clean look */
+.leaflet-popup-content-wrapper {
+  border-radius: 8px !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3) !important;
+}
+
+.leaflet-popup-content {
+  margin: 10px 14px !important;
+}
+
+/* Proximity search center marker - red tint to distinguish from warehouse pins */
+.proximity-center-marker {
+  filter: hue-rotate(140deg) saturate(1.5) brightness(1.1);
+}
