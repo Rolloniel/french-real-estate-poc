@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
 import L from "leaflet";
-import { Warehouse } from "@/lib/types";
+import { Warehouse, WarehouseFilters } from "@/lib/types";
 import { fetchWarehouses } from "@/lib/api";
 import { formatEur, formatSurface, formatDate } from "@/lib/format";
 import "leaflet/dist/leaflet.css";
@@ -25,24 +25,53 @@ L.Marker.prototype.options.icon = DefaultIcon;
 const FRANCE_CENTER: [number, number] = [46.6, 2.3];
 const FRANCE_ZOOM = 6;
 
-export default function WarehouseMap() {
+interface WarehouseMapProps {
+  filters: WarehouseFilters;
+  onResultCount: (count: number) => void;
+}
+
+export default function WarehouseMap({
+  filters,
+  onResultCount,
+}: WarehouseMapProps) {
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const loadData = useCallback(
+    (f: WarehouseFilters) => {
+      setLoading(true);
+      fetchWarehouses(100, 0, f)
+        .then((data) => {
+          setWarehouses(data.items);
+          onResultCount(data.total);
+          setLoading(false);
+        })
+        .catch((err) => {
+          setError(err.message);
+          setLoading(false);
+        });
+    },
+    [onResultCount]
+  );
 
   useEffect(() => {
-    fetchWarehouses(100)
-      .then((data) => {
-        setWarehouses(data.items);
-        setLoading(false);
-      })
-      .catch((err) => {
-        setError(err.message);
-        setLoading(false);
-      });
-  }, []);
+    // Debounce filter changes by 400ms
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(() => {
+      loadData(filters);
+    }, 400);
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+    };
+  }, [filters, loadData]);
 
-  if (loading) {
+  if (loading && warehouses.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="flex flex-col items-center gap-3">

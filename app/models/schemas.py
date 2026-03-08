@@ -17,6 +17,10 @@ class Warehouse(BaseModel):
     longitude: Optional[float] = None
 
 
+class NearbyWarehouse(Warehouse):
+    distance_km: float
+
+
 class WarehouseListResponse(BaseModel):
     items: list[Warehouse]
     total: int
@@ -24,7 +28,25 @@ class WarehouseListResponse(BaseModel):
     offset: int
 
 
+class NearbyWarehouseListResponse(BaseModel):
+    items: list[NearbyWarehouse]
+    total: int
+    center_lat: float
+    center_lng: float
+    radius_km: float
+
+
 class StatsResponse(BaseModel):
     count: int
     avg_price: float
     total_surface: float
+
+
+class DepartmentStat(BaseModel):
+    department: str
+    avg_price_per_m2: float
+    total_count: int
+
+
+class DepartmentStatsResponse(BaseModel):
+    items: list[DepartmentStat]
