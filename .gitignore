@@ -8,3 +8,8 @@ dist/
 build/
 .sisyphus/
 cover_letter_draft.md
+
+# Gas Town (added by gt)
+.runtime/
+.claude/
+.logs/
