@@ -14,3 +14,7 @@ cover_letter_draft.md
 .claude/
 .logs/
 .beads/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
