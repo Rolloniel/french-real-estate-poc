@@ -13,3 +13,4 @@ cover_letter_draft.md
 .runtime/
 .claude/
 .logs/
+.beads/
