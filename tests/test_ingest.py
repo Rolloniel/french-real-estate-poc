@@ -1,5 +1,7 @@
 """Tests for DVF ingestion script."""
 
+from datetime import date
+
 import pytest
 from scripts.ingest_dvf import parse_row, filter_warehouses
 
@@ -34,7 +36,7 @@ class TestParseRow:
         assert result["department"] == "77"
         assert result["surface_m2"] == 15000.5
         assert result["price_eur"] == 2500000.00
-        assert result["transaction_date"] == "2024-03-15"
+        assert result["transaction_date"] == date(2024, 3, 15)
         assert result["latitude"] == 48.5423
         assert result["longitude"] == 2.6553
         assert result["property_type"] == "Local industriel. commercial ou assimilé"
@@ -255,7 +257,7 @@ class TestTransformDate:
         result = parse_row(dvf_row)
 
         assert result is not None
-        assert result["transaction_date"] == "2024-03-15"
+        assert result["transaction_date"] == date(2024, 3, 15)
 
     def test_transform_date_handles_empty(self):
         """Verify empty date is handled gracefully."""

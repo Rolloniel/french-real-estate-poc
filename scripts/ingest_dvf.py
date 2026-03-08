@@ -9,6 +9,7 @@ import csv
 import gzip
 import tempfile
 import uuid
+from datetime import date
 from pathlib import Path
 from urllib.request import urlretrieve
 
@@ -60,10 +61,10 @@ def parse_row(row: dict) -> dict | None:
         except (ValueError, TypeError):
             return None
 
-    def parse_date(value: str | None) -> str | None:
+    def parse_date(value: str | None) -> date | None:
         if not value or value == "":
             return None
-        return value
+        return date.fromisoformat(value)
 
     return {
         "dvf_mutation_id": row.get("id_mutation"),
