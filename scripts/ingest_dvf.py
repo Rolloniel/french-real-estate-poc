@@ -1,16 +1,22 @@
 """DVF data ingestion script.
 
 Downloads DVF data from data.gouv.fr, filters for large warehouses,
-and inserts into Supabase.
+and inserts into PostgreSQL.
 """
 
+import asyncio
 import csv
 import gzip
 import tempfile
+import uuid
 from pathlib import Path
 from urllib.request import urlretrieve
 
-from app.db import get_service_client
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+from app.config import get_settings
+from app.models.schemas import Base, WarehouseModel
 
 DVF_URL_TEMPLATE = (
     "https://files.data.gouv.fr/geo-dvf/latest/csv/2024/departements/{dept}.csv.gz"
@@ -22,51 +28,30 @@ WAREHOUSE_TYPE = "Local industriel. commercial ou assimilé"
 
 
 def download_dvf(department: str) -> Path:
-    """Downloads gzipped CSV to temp file, returns path to decompressed CSV.
-
-    Args:
-        department: French department code (e.g., "77")
-
-    Returns:
-        Path to the decompressed CSV file
-    """
+    """Downloads gzipped CSV to temp file, returns path to decompressed CSV."""
     url = DVF_URL_TEMPLATE.format(dept=department)
 
-    # Download gzipped file
     temp_gz = tempfile.NamedTemporaryFile(suffix=".csv.gz", delete=False)
     urlretrieve(url, temp_gz.name)
 
-    # Decompress to CSV
     temp_csv = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
     with gzip.open(temp_gz.name, "rt", encoding="utf-8") as f_in:
         with open(temp_csv.name, "w", encoding="utf-8") as f_out:
             f_out.write(f_in.read())
 
-    # Cleanup gzipped file
     Path(temp_gz.name).unlink()
-
     return Path(temp_csv.name)
 
 
 def parse_row(row: dict) -> dict | None:
-    """Extracts and transforms fields per mapping. Returns None if required fields missing.
-
-    Args:
-        row: Dictionary from CSV DictReader
-
-    Returns:
-        Transformed dictionary for database insertion, or None if id_mutation is missing
-    """
-    # Skip if id_mutation is missing (required field)
+    """Extracts and transforms fields per mapping. Returns None if required fields missing."""
     if not row.get("id_mutation"):
         return None
 
-    # Build address from components
     numero = row.get("adresse_numero") or ""
     voie = row.get("adresse_nom_voie") or ""
     address = f"{numero} {voie}".strip()
 
-    # Parse numeric fields (allow None for optional fields)
     def parse_float(value: str | None) -> float | None:
         if not value or value == "":
             return None
@@ -75,11 +60,10 @@ def parse_row(row: dict) -> dict | None:
         except (ValueError, TypeError):
             return None
 
-    # Parse date (allow None for optional field)
     def parse_date(value: str | None) -> str | None:
         if not value or value == "":
             return None
-        return value  # Already in ISO-8601 format (YYYY-MM-DD)
+        return value
 
     return {
         "dvf_mutation_id": row.get("id_mutation"),
@@ -97,20 +81,13 @@ def parse_row(row: dict) -> dict | None:
 
 
 def _is_valid_warehouse(row: dict) -> bool:
-    """Returns True if row should be included. Skips if required fields missing.
-
-    Args:
-        row: Raw DVF row dictionary
-
-    Returns:
-        True if row passes all filter criteria
-    """
+    """Returns True if row should be included."""
     try:
         has_id = bool(row.get("id_mutation"))
         is_warehouse = row.get("type_local") == WAREHOUSE_TYPE
         surface = row.get("surface_reelle_bati")
         has_surface = bool(surface and surface != "")
-        has_large_surface = has_surface and float(surface) >= MIN_SURFACE_M2  # type: ignore[arg-type]
+        has_large_surface = has_surface and float(surface) >= MIN_SURFACE_M2
         price = row.get("valeur_fonciere")
         has_price = bool(price and price != "")
         return has_id and is_warehouse and has_large_surface and has_price
@@ -119,14 +96,7 @@ def _is_valid_warehouse(row: dict) -> bool:
 
 
 def filter_warehouses(rows: list[dict]) -> list[dict]:
-    """Applies filters, returns max 100 qualifying warehouses.
-
-    Args:
-        rows: List of raw DVF row dictionaries
-
-    Returns:
-        List of transformed warehouse dictionaries (max 100)
-    """
+    """Applies filters, returns max 100 qualifying warehouses."""
     warehouses = []
     for row in rows:
         if _is_valid_warehouse(row):
@@ -138,29 +108,38 @@ def filter_warehouses(rows: list[dict]) -> list[dict]:
     return warehouses
 
 
-def insert_to_supabase(warehouses: list[dict]) -> int:
-    """Inserts to DB using SERVICE_ROLE_KEY. Returns count inserted.
+async def _insert_to_db(warehouses: list[dict]) -> int:
+    """Async implementation: create tables and insert warehouses."""
+    settings = get_settings()
+    engine = create_async_engine(settings.async_database_url)
 
-    Args:
-        warehouses: List of warehouse dictionaries to insert
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
-    Returns:
-        Number of records inserted
-    """
+    async with AsyncSession(engine) as session:
+        for wh in warehouses:
+            wh["id"] = uuid.uuid4()
+        stmt = (
+            pg_insert(WarehouseModel)
+            .values(warehouses)
+            .on_conflict_do_nothing(index_elements=["dvf_mutation_id"])
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+    await engine.dispose()
+    return len(warehouses)
+
+
+def insert_to_db(warehouses: list[dict]) -> int:
+    """Inserts to PostgreSQL. Returns count inserted."""
     if not warehouses:
         return 0
-
-    client = get_service_client()
-    result = client.table("warehouses").insert(warehouses).execute()
-    return len(result.data)
+    return asyncio.run(_insert_to_db(warehouses))
 
 
 def main(department: str = "77") -> None:
-    """Orchestrates the pipeline.
-
-    Args:
-        department: French department code (default: "77" - Seine-et-Marne)
-    """
+    """Orchestrates the pipeline."""
     print(f"Downloading DVF data for department {department}...")
     csv_path = download_dvf(department)
 
@@ -174,10 +153,9 @@ def main(department: str = "77") -> None:
     warehouses = filter_warehouses(rows)
     print(f"Filtered to {len(warehouses)} warehouses")
 
-    count = insert_to_supabase(warehouses)
+    count = insert_to_db(warehouses)
     print(f"Inserted {count} records")
 
-    # Cleanup
     csv_path.unlink()
 
 
