@@ -1,6 +1,7 @@
+import logging
 import math
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from app.db import get_db
 from app.models.schemas import (
@@ -11,7 +12,12 @@ from app.models.schemas import (
     StatsResponse,
 )
 
+logger = logging.getLogger(__name__)
+
 EARTH_RADIUS_KM = 6371.0
+
+# Cap for unbounded analytics-style fetches to prevent memory blowout
+MAX_ROWS_FOR_AGGREGATION = 10_000
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -25,6 +31,23 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2) ** 2
     )
     return EARTH_RADIUS_KM * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def bounding_box(lat: float, lng: float, radius_km: float) -> tuple[float, float, float, float]:
+    """Return (lat_min, lat_max, lng_min, lng_max) for a bounding box around the point.
+
+    Uses a conservative approximation: 1 degree latitude ~ 111 km.
+    Longitude degrees shrink with cos(latitude), so we divide by cos(lat).
+    """
+    delta_lat = radius_km / 111.0
+    delta_lng = radius_km / (111.0 * max(math.cos(math.radians(lat)), 1e-10))
+    return (
+        lat - delta_lat,
+        lat + delta_lat,
+        lng - delta_lng,
+        lng + delta_lng,
+    )
+
 
 router = APIRouter(prefix="/api", tags=["warehouses"])
 
@@ -42,47 +65,53 @@ async def list_warehouses(
     date_to: Optional[str] = Query(default=None),
     commune: Optional[str] = Query(default=None),
 ):
-    # Clamp values explicitly (FastAPI Query constraints don't clamp, they reject)
-    limit = max(1, min(100, limit))
-    offset = max(0, offset)
+    try:
+        # Clamp values explicitly (FastAPI Query constraints don't clamp, they reject)
+        limit = max(1, min(100, limit))
+        offset = max(0, offset)
 
-    db = get_db()
-    query = db.table("warehouses").select("*", count="exact")
+        db = get_db()
+        query = db.table("warehouses").select("*", count="exact")
 
-    # Apply filters
-    if department:
-        query = query.eq("department", department)
-    if min_price is not None:
-        query = query.gte("price_eur", min_price)
-    if max_price is not None:
-        query = query.lte("price_eur", max_price)
-    if min_surface is not None:
-        query = query.gte("surface_m2", min_surface)
-    if max_surface is not None:
-        query = query.lte("surface_m2", max_surface)
-    if date_from:
-        query = query.gte("transaction_date", date_from)
-    if date_to:
-        query = query.lte("transaction_date", date_to)
-    if commune:
-        query = query.ilike("commune", f"%{commune}%")
+        # Apply filters
+        if department:
+            query = query.eq("department", department)
+        if min_price is not None:
+            query = query.gte("price_eur", min_price)
+        if max_price is not None:
+            query = query.lte("price_eur", max_price)
+        if min_surface is not None:
+            query = query.gte("surface_m2", min_surface)
+        if max_surface is not None:
+            query = query.lte("surface_m2", max_surface)
+        if date_from:
+            query = query.gte("transaction_date", date_from)
+        if date_to:
+            query = query.lte("transaction_date", date_to)
+        if commune:
+            query = query.ilike("commune", f"%{commune}%")
 
-    result = (
-        query.order("transaction_date", desc=True, nullsfirst=False)
-        .limit(limit)
-        .offset(offset)
-        .execute()
-    )
+        result = (
+            query.order("transaction_date", desc=True, nullsfirst=False)
+            .limit(limit)
+            .offset(offset)
+            .execute()
+        )
 
-    items = [Warehouse(**row) for row in result.data]
-    total = result.count if result.count is not None else len(items)
+        items = [Warehouse(**row) for row in result.data]
+        total = result.count if result.count is not None else len(items)
 
-    return WarehouseListResponse(
-        items=items,
-        total=total,
-        limit=limit,
-        offset=offset,
-    )
+        return WarehouseListResponse(
+            items=items,
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error listing warehouses")
+        raise HTTPException(status_code=500, detail=f"Failed to list warehouses: {e}")
 
 
 @router.get("/warehouses/nearby", response_model=NearbyWarehouseListResponse)
@@ -93,65 +122,104 @@ async def nearby_warehouses(
         default=50, ge=1, le=500, description="Search radius in km"
     ),
 ):
-    """Return warehouses within radius_km of the given point, sorted by distance."""
-    db = get_db()
+    """Return warehouses within radius_km of the given point, sorted by distance.
 
-    # Fetch all warehouses with coordinates (POC-scale dataset)
-    result = db.table("warehouses").select("*").execute()
+    Uses a SQL bounding-box pre-filter to avoid loading the entire table,
+    then applies precise Haversine on the reduced candidate set.
+    """
+    try:
+        db = get_db()
 
-    nearby = []
-    for row in result.data:
-        w_lat = row.get("latitude")
-        w_lng = row.get("longitude")
-        if w_lat is None or w_lng is None:
-            continue
+        # --- Bounding box pre-filter (SQL-side) ---
+        lat_min, lat_max, lng_min, lng_max = bounding_box(lat, lng, radius_km)
 
-        dist = haversine(lat, lng, w_lat, w_lng)
-        if dist <= radius_km:
-            nearby.append(NearbyWarehouse(**row, distance_km=round(dist, 2)))
+        result = (
+            db.table("warehouses")
+            .select("*")
+            .not_.is_("latitude", "null")
+            .not_.is_("longitude", "null")
+            .gte("latitude", lat_min)
+            .lte("latitude", lat_max)
+            .gte("longitude", lng_min)
+            .lte("longitude", lng_max)
+            .execute()
+        )
 
-    # Sort by distance ascending (nearest first)
-    nearby.sort(key=lambda w: w.distance_km)
+        # --- Precise Haversine filter on the reduced set ---
+        nearby = []
+        for row in result.data:
+            w_lat = row.get("latitude")
+            w_lng = row.get("longitude")
+            if w_lat is None or w_lng is None:
+                continue
 
-    return NearbyWarehouseListResponse(
-        items=nearby,
-        total=len(nearby),
-        center_lat=lat,
-        center_lng=lng,
-        radius_km=radius_km,
-    )
+            dist = haversine(lat, lng, w_lat, w_lng)
+            if dist <= radius_km:
+                nearby.append(NearbyWarehouse(**row, distance_km=round(dist, 2)))
+
+        # Sort by distance ascending (nearest first)
+        nearby.sort(key=lambda w: w.distance_km)
+
+        return NearbyWarehouseListResponse(
+            items=nearby,
+            total=len(nearby),
+            center_lat=lat,
+            center_lng=lng,
+            radius_km=radius_km,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error finding nearby warehouses")
+        raise HTTPException(status_code=500, detail=f"Failed to find nearby warehouses: {e}")
 
 
 @router.get("/departments", response_model=list[str])
 async def list_departments():
     """Return sorted list of unique department values for filter dropdown."""
-    db = get_db()
-    result = db.table("warehouses").select("department").execute()
-    departments = sorted(
-        {r["department"] for r in result.data if r.get("department")}
-    )
-    return departments
+    try:
+        db = get_db()
+        result = db.table("warehouses").select("department").execute()
+        departments = sorted(
+            {r["department"] for r in result.data if r.get("department")}
+        )
+        return departments
+    except Exception as e:
+        logger.exception("Error listing departments")
+        raise HTTPException(status_code=500, detail=f"Failed to list departments: {e}")
 
 
 @router.get("/stats", response_model=StatsResponse)
 async def get_stats():
-    db = get_db()
+    """Return aggregate stats. Fetches are capped at MAX_ROWS_FOR_AGGREGATION."""
+    try:
+        db = get_db()
 
-    # Get count
-    count_result = db.table("warehouses").select("id", count="exact").execute()
-    count = count_result.count or 0
+        # Get count via Supabase count header (no row data transferred)
+        count_result = db.table("warehouses").select("id", count="exact").limit(0).execute()
+        count = count_result.count or 0
 
-    # Get all data for avg/sum (acceptable for POC with <1000 rows)
-    all_data = db.table("warehouses").select("price_eur, surface_m2").execute()
+        # Fetch price/surface columns only, with a safety cap
+        all_data = (
+            db.table("warehouses")
+            .select("price_eur, surface_m2")
+            .limit(MAX_ROWS_FOR_AGGREGATION)
+            .execute()
+        )
 
-    prices = [r["price_eur"] for r in all_data.data if r.get("price_eur")]
-    surfaces = [r["surface_m2"] for r in all_data.data if r.get("surface_m2")]
+        prices = [r["price_eur"] for r in all_data.data if r.get("price_eur")]
+        surfaces = [r["surface_m2"] for r in all_data.data if r.get("surface_m2")]
 
-    avg_price = round(sum(prices) / len(prices), 2) if prices else 0.0
-    total_surface = round(sum(surfaces), 2) if surfaces else 0.0
+        avg_price = round(sum(prices) / len(prices), 2) if prices else 0.0
+        total_surface = round(sum(surfaces), 2) if surfaces else 0.0
 
-    return StatsResponse(
-        count=count,
-        avg_price=avg_price,
-        total_surface=total_surface,
-    )
+        return StatsResponse(
+            count=count,
+            avg_price=avg_price,
+            total_surface=total_surface,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error computing stats")
+        raise HTTPException(status_code=500, detail=f"Failed to compute stats: {e}")
