@@ -2,10 +2,15 @@
 
 Downloads DVF data from data.gouv.fr, filters for large warehouses,
 and inserts into Supabase.
+
+Supports processing a single department, a comma-separated list,
+or all French departments at once.
 """
 
+import argparse
 import csv
 import gzip
+import sys
 import tempfile
 from pathlib import Path
 from urllib.request import urlretrieve
@@ -16,9 +21,20 @@ DVF_URL_TEMPLATE = (
     "https://files.data.gouv.fr/geo-dvf/latest/csv/2024/departements/{dept}.csv.gz"
 )
 
-MAX_WAREHOUSES = 100
 MIN_SURFACE_M2 = 10000
 WAREHOUSE_TYPE = "Local industriel. commercial ou assimilé"
+
+# All French department codes:
+# - 01 to 19 (mainland)
+# - 2A and 2B (Corsica, replacing the old "20")
+# - 21 to 95 (mainland)
+# - 971 to 976 (overseas)
+ALL_DEPARTMENTS: list[str] = (
+    [f"{i:02d}" for i in range(1, 20)]
+    + ["2A", "2B"]
+    + [f"{i:02d}" for i in range(21, 96)]
+    + [str(i) for i in range(971, 977)]
+)
 
 
 def download_dvf(department: str) -> Path:
@@ -118,14 +134,15 @@ def _is_valid_warehouse(row: dict) -> bool:
         return False
 
 
-def filter_warehouses(rows: list[dict]) -> list[dict]:
-    """Applies filters, returns max 100 qualifying warehouses.
+def filter_warehouses(rows: list[dict], limit: int | None = None) -> list[dict]:
+    """Applies filters, returns qualifying warehouses up to an optional limit.
 
     Args:
         rows: List of raw DVF row dictionaries
+        limit: Maximum number of warehouses to return. None means no limit.
 
     Returns:
-        List of transformed warehouse dictionaries (max 100)
+        List of transformed warehouse dictionaries
     """
     warehouses = []
     for row in rows:
@@ -133,7 +150,7 @@ def filter_warehouses(rows: list[dict]) -> list[dict]:
             parsed = parse_row(row)
             if parsed:
                 warehouses.append(parsed)
-                if len(warehouses) >= MAX_WAREHOUSES:
+                if limit is not None and len(warehouses) >= limit:
                     break
     return warehouses
 
@@ -155,30 +172,122 @@ def insert_to_supabase(warehouses: list[dict]) -> int:
     return len(result.data)
 
 
-def main(department: str = "77") -> None:
-    """Orchestrates the pipeline.
+def process_department(department: str, limit: int | None = None) -> int:
+    """Downloads, filters, and inserts warehouse data for a single department.
 
     Args:
-        department: French department code (default: "77" - Seine-et-Marne)
+        department: French department code (e.g., "77")
+        limit: Maximum number of warehouses to insert. None means no limit.
+
+    Returns:
+        Number of records inserted for this department.
+
+    Raises:
+        Exception: Any error encountered during download, parsing, or insertion.
     """
-    print(f"Downloading DVF data for department {department}...")
+    print(f"  Downloading DVF data for department {department}...")
     csv_path = download_dvf(department)
 
-    print("Parsing CSV...")
-    rows = []
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-    print(f"Parsed {len(rows)} rows")
+    try:
+        print(f"  Parsing CSV for department {department}...")
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        print(f"  Parsed {len(rows)} rows from department {department}")
 
-    warehouses = filter_warehouses(rows)
-    print(f"Filtered to {len(warehouses)} warehouses")
+        warehouses = filter_warehouses(rows, limit=limit)
+        print(f"  Filtered to {len(warehouses)} warehouses in department {department}")
 
-    count = insert_to_supabase(warehouses)
-    print(f"Inserted {count} records")
+        count = insert_to_supabase(warehouses)
+        print(f"  Inserted {count} records for department {department}")
+        return count
+    finally:
+        # Always clean up the temp CSV
+        csv_path.unlink(missing_ok=True)
 
-    # Cleanup
-    csv_path.unlink()
+
+def resolve_departments(args: argparse.Namespace) -> list[str]:
+    """Determines which departments to process based on CLI arguments.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        List of department code strings.
+    """
+    if args.all:
+        return list(ALL_DEPARTMENTS)
+    if args.departments:
+        return [d.strip() for d in args.departments.split(",") if d.strip()]
+    return ["77"]
+
+
+def main() -> None:
+    """Orchestrates the pipeline with CLI argument support."""
+    parser = argparse.ArgumentParser(
+        description="Ingest DVF warehouse data into Supabase."
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Process all French departments (mainland + overseas).",
+    )
+    parser.add_argument(
+        "--departments",
+        type=str,
+        default=None,
+        help='Comma-separated list of department codes (e.g., "75,77,78,92,93,94").',
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of warehouses per department. Default: no limit.",
+    )
+    args = parser.parse_args()
+
+    if args.all and args.departments:
+        print("Error: --all and --departments are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+
+    departments = resolve_departments(args)
+    total_departments = len(departments)
+    limit = args.limit
+
+    print(f"Starting ingestion for {total_departments} department(s)...")
+    if limit is not None:
+        print(f"Record limit per department: {limit}")
+    print()
+
+    total_inserted = 0
+    succeeded: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    for i, dept in enumerate(departments, start=1):
+        print(f"[{i}/{total_departments}] Processing department {dept}...")
+        try:
+            count = process_department(dept, limit=limit)
+            total_inserted += count
+            succeeded.append(dept)
+        except Exception as exc:
+            error_msg = str(exc)
+            print(f"  ERROR processing department {dept}: {error_msg}", file=sys.stderr)
+            failed.append((dept, error_msg))
+        print()
+
+    # Summary
+    print("=" * 60)
+    print("INGESTION SUMMARY")
+    print("=" * 60)
+    print(f"Total departments processed: {len(succeeded)}/{total_departments}")
+    print(f"Total records inserted:      {total_inserted}")
+    if failed:
+        print(f"Failed departments ({len(failed)}):")
+        for dept, error in failed:
+            print(f"  - {dept}: {error}")
+    else:
+        print("All departments processed successfully.")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
