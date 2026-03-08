@@ -1,21 +1,26 @@
+from collections.abc import AsyncGenerator
 from functools import lru_cache
-from supabase import Client, create_client
+
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
 from app.config import get_settings
 
 
 @lru_cache()
-def get_supabase_client() -> Client:
-    """Client for API reads (uses anon key, respects RLS)."""
-    settings = get_settings()
-    return create_client(settings.supabase_url, settings.supabase_anon_key)
+def get_engine() -> AsyncEngine:
+    return create_async_engine(get_settings().async_database_url)
 
 
-def get_db() -> Client:
-    """Alias for get_supabase_client."""
-    return get_supabase_client()
+@lru_cache()
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(get_engine(), expire_on_commit=False)
 
 
-def get_service_client() -> Client:
-    """Client for writes (uses service role key, bypasses RLS)."""
-    settings = get_settings()
-    return create_client(settings.supabase_url, settings.supabase_service_role_key)
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    async with get_session_factory()() as session:
+        yield session

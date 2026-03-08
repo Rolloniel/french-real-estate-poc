@@ -3,10 +3,14 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    # Supabase - two keys for different access levels
-    supabase_url: str = ""
-    supabase_service_role_key: str = ""  # For ingestion (bypasses RLS)
-    supabase_anon_key: str = ""  # For API reads (respects RLS)
+    database_url: str = ""
+
+    @property
+    def async_database_url(self) -> str:
+        """Convert standard postgresql:// URL to asyncpg URL."""
+        return self.database_url.replace(
+            "postgresql://", "postgresql+asyncpg://", 1
+        )
 
     class Config:
         env_file = ".env"
