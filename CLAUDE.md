@@ -5,15 +5,18 @@ POC demonstrating French open data (DVF) ingestion and querying for warehouse/in
 ## Architecture
 
 - **Backend:** FastAPI (Python 3.12), single router: warehouses
+- **Frontend:** Next.js (standalone mode), proxies `/api/*` to backend
 - **Database:** PostgreSQL (Coolify-managed on VPS)
 
 ## Deployment (Coolify)
 
 | Component | UUID | Domain |
 |-----------|------|--------|
-| API | `e4cs4cwowgws4s8sc44ssc8o` | `realestate.kliuiev.com` |
+| API | `e4cs4cwowgws4s8sc44ssc8o` | `api-realestate.kliuiev.com` |
+| Frontend | `so0c48ow4o8ss0wwsscok0ck` | `realestate.kliuiev.com` |
 
-- Health: `GET /health` → `{"status": "healthy"}`
+- Backend health: `GET /health` → `{"status": "healthy"}`
+- Frontend proxies `/api/*` requests to the backend via Next.js rewrites
 
 ## Environment Variables
 
