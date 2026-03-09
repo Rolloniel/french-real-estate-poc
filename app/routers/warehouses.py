@@ -1,5 +1,7 @@
 import math
 
+from datetime import date
+
 from fastapi import APIRouter, Query, Depends
 from typing import Optional
 from sqlalchemy import select, func
@@ -55,8 +57,8 @@ async def list_warehouses(
     max_price: Optional[float] = Query(default=None),
     min_surface: Optional[float] = Query(default=None),
     max_surface: Optional[float] = Query(default=None),
-    date_from: Optional[str] = Query(default=None),
-    date_to: Optional[str] = Query(default=None),
+    date_from: Optional[date] = Query(default=None),
+    date_to: Optional[date] = Query(default=None),
     commune: Optional[str] = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
 ):
