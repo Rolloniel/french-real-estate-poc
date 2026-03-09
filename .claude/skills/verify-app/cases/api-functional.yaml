@@ -1,0 +1,123 @@
+# Functional API test cases — deeper endpoint validation.
+# Used by: /verify-app full
+
+- id: warehouses-filter-department
+  phase: functional
+  method: GET
+  path: /api/warehouses?department=77&limit=5
+  assert:
+    status: 200
+    json_has_key: items
+
+- id: warehouses-filter-price-range
+  phase: functional
+  method: GET
+  path: /api/warehouses?min_price=100000&max_price=5000000&limit=5
+  assert:
+    status: 200
+    json_has_key: items
+
+- id: warehouses-filter-surface-range
+  phase: functional
+  method: GET
+  path: /api/warehouses?min_surface=10000&max_surface=50000&limit=5
+  assert:
+    status: 200
+    json_has_key: items
+
+- id: warehouses-filter-commune
+  phase: functional
+  method: GET
+  path: /api/warehouses?commune=paris&limit=5
+  assert:
+    status: 200
+    json_has_key: items
+
+- id: warehouses-filter-combined
+  phase: functional
+  method: GET
+  path: /api/warehouses?department=77&min_surface=10000&limit=5
+  assert:
+    status: 200
+    json_has_key: items
+
+- id: warehouses-pagination
+  phase: functional
+  method: GET
+  path: /api/warehouses?limit=2&offset=0
+  assert:
+    status: 200
+    json_has_key: total
+
+- id: nearby-small-radius
+  phase: functional
+  method: GET
+  path: /api/warehouses/nearby?lat=48.8566&lng=2.3522&radius_km=10
+  assert:
+    status: 200
+    json_has_key: items
+
+- id: analytics-price-per-m2-has-stats
+  phase: functional
+  method: GET
+  path: /api/analytics/price-per-m2
+  assert:
+    status: 200
+    json_has_key: median
+
+- id: analytics-by-department-has-data
+  phase: functional
+  method: GET
+  path: /api/analytics/by-department
+  assert:
+    status: 200
+    json_array_not_empty: departments
+
+- id: analytics-trends-has-data
+  phase: functional
+  method: GET
+  path: /api/analytics/price-trends
+  assert:
+    status: 200
+    json_array_not_empty: trends
+
+- id: analytics-top-communes-has-both
+  phase: functional
+  method: GET
+  path: /api/analytics/top-communes
+  assert:
+    status: 200
+    json_has_key: cheapest
+
+- id: analytics-department-stats-has-data
+  phase: functional
+  method: GET
+  path: /api/analytics/department-stats
+  assert:
+    status: 200
+    json_array_not_empty: items
+
+- id: warehouses-filter-date-range
+  phase: functional
+  method: GET
+  path: /api/warehouses?date_from=2024-01-01&date_to=2024-06-30&limit=5
+  assert:
+    status: 200
+    json_has_key: items
+
+- id: warehouses-item-structure
+  phase: functional
+  method: GET
+  path: /api/warehouses?limit=1
+  assert:
+    status: 200
+    json_has_key: items
+    body_contains: "price_eur"
+
+- id: departments-is-string-array
+  phase: functional
+  method: GET
+  path: /api/departments
+  assert:
+    status: 200
+    body_contains: "01"

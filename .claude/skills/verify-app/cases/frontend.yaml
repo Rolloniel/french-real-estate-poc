@@ -1,0 +1,273 @@
+# Frontend test cases — page rendering and interactive UI checks.
+# Smoke cases verify pages load. Functional cases test interactions.
+# Used by: /verify-app smoke (smoke phase only), /verify-app full (all phases)
+
+# --- Smoke: pages render ---
+
+- id: map-page-renders
+  phase: smoke
+  description: "Navigate to home page, verify the map page header, navigation, and filter panel load"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - take a snapshot
+    - verify header shows "Warehouse Map" and navigation tabs "Map" and "Analytics" are present
+    - verify filter panel is visible with "Filters" heading and "Department" label
+  assert:
+    snapshot_contains: ["Warehouse Map", "Map", "Analytics", "Filters", "Department"]
+
+- id: analytics-page-renders
+  phase: smoke
+  description: "Navigate to analytics page, verify header and chart titles load"
+  steps:
+    - navigate to /analytics
+    - wait for page to load (charts may take a moment)
+    - take a snapshot
+    - verify header shows "Warehouse Analytics"
+    - verify at least one chart card title is visible
+  assert:
+    snapshot_contains: ["Warehouse Analytics", "Price per m2"]
+
+# --- Functional: interactions ---
+
+- id: nav-map-to-analytics
+  phase: functional
+  description: "Click the Analytics tab from the map page, verify navigation works"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - find and click the "Analytics" navigation tab/link
+    - wait for analytics page to load
+    - verify the page now shows "Warehouse Analytics" header
+  assert:
+    snapshot_contains: ["Warehouse Analytics"]
+
+- id: nav-analytics-to-map
+  phase: functional
+  description: "Click the Map tab from the analytics page, verify navigation back works"
+  steps:
+    - navigate to /analytics
+    - wait for page to load
+    - find and click the "Map" navigation tab/link
+    - wait for map page to load
+    - verify the page now shows "Warehouse Map" header
+  assert:
+    snapshot_contains: ["Warehouse Map"]
+
+- id: filter-department-interaction
+  phase: functional
+  description: "On map page, select a department from the filter dropdown, verify the result count changes"
+  steps:
+    - navigate to /
+    - wait for page to load and note the initial result count shown in the filter panel
+    - find the department select dropdown (below "Department" label)
+    - select a specific department value (pick one from the dropdown options, e.g. the first non-empty option)
+    - wait 2-3 seconds for results to update
+    - take a snapshot
+    - verify the result count has changed or the department value is reflected in the dropdown
+  assert:
+    snapshot_contains: ["results"]
+
+- id: filter-commune-search
+  phase: functional
+  description: "On map page, type a commune name in the search input, verify results update"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - find the commune text input (placeholder "Search commune...")
+    - type a commune name that likely exists (e.g. "Roissy" or "Meaux")
+    - wait 2-3 seconds for results to update
+    - take a snapshot
+    - verify the input now contains the typed text
+  assert:
+    snapshot_contains: ["results"]
+
+- id: stats-bar-displays
+  phase: functional
+  description: "Verify the stats bar in the header shows warehouse count, avg price, and total surface"
+  steps:
+    - navigate to /
+    - wait for page to load and for stats to fetch
+    - take a snapshot
+    - verify the header area contains "Warehouses", "Avg. Price", and "Total Surface" labels
+  assert:
+    snapshot_contains: ["Warehouses", "Avg. Price", "Total Surface"]
+
+- id: analytics-charts-load
+  phase: functional
+  description: "Verify all four chart cards render on the analytics page"
+  steps:
+    - navigate to /analytics
+    - wait for page to fully load (all charts)
+    - take a snapshot
+    - verify all chart card titles are visible
+  assert:
+    snapshot_contains: ["Price per m2 Distribution", "Average Price per m2 by Department", "Price Trends Over Time", "Top Communes"]
+
+- id: analytics-summary-stats
+  phase: functional
+  description: "Verify the summary stats row shows median, mean, departments count, and time periods"
+  steps:
+    - navigate to /analytics
+    - wait for page to fully load
+    - take a snapshot
+    - verify summary stat labels are present
+  assert:
+    snapshot_contains: ["Median Price/m2", "Mean Price/m2", "Departments", "Time Periods"]
+
+- id: heatmap-toggle
+  phase: functional
+  description: "Toggle from Pins to Heatmap view, verify heatmap legend appears"
+  steps:
+    - navigate to /
+    - wait for page to load and markers to appear
+    - find and click the "Pins | Switch to Heatmap" toggle button
+    - wait 3 seconds for heatmap data to load
+    - take a snapshot
+    - verify the view toggle now says "Heatmap" and "Switch to Pins"
+  assert:
+    snapshot_contains: ["Heatmap", "Switch to Pins"]
+
+- id: filter-panel-collapse
+  phase: functional
+  description: "Collapse the filter panel, verify Filters heading disappears, then expand again"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - find and click the "Hide filters" button
+    - take a snapshot
+    - verify the "Filters" heading is no longer visible and "Show filters" button appears
+  assert:
+    snapshot_contains: ["Show filters"]
+
+- id: filter-clear-all
+  phase: functional
+  description: "Apply a department filter, then click Clear All, verify filters reset"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - select department "77" from the department dropdown
+    - wait 2 seconds for results to update
+    - verify "Clear All" button appears
+    - click the "Clear All" button
+    - wait 2 seconds for results to reset
+    - take a snapshot
+    - verify the result count returns to the full count and "All departments" is selected
+  assert:
+    snapshot_contains: ["All departments", "results"]
+
+- id: marker-popup-details
+  phase: functional
+  description: "Click a warehouse marker on the map, verify popup shows price and commune details"
+  steps:
+    - navigate to /
+    - wait for page to load and markers to appear
+    - click on the first visible Marker button on the map
+    - take a snapshot
+    - verify the popup contains warehouse details like Surface and Commune
+  assert:
+    snapshot_contains: ["Surface", "Commune"]
+
+- id: filter-price-range-ui
+  phase: functional
+  description: "Enter a min price in the price filter, verify results update"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - find the first spinbutton under the Price (EUR) section
+    - enter "500000" in the min price field
+    - wait 2 seconds for results to update
+    - take a snapshot
+    - verify the result count changed from the default
+  assert:
+    snapshot_contains: ["results"]
+
+- id: proximity-search-activate
+  phase: functional
+  description: "Activate proximity search mode, verify instructions and controls appear"
+  steps:
+    - navigate to /
+    - wait for page to load and markers to appear
+    - find and click the "Proximity Search" button
+    - take a snapshot
+    - verify the button now says "Exit Proximity Search" and instructions "Click on the map to set a center point" appear
+  assert:
+    snapshot_contains: ["Exit Proximity Search", "Click on the map to set a center point"]
+
+- id: filter-surface-range-ui
+  phase: functional
+  description: "Enter a min surface value in the surface filter, verify results update"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - find the spinbutton inputs under the Surface (m2) section
+    - enter "5000" in the min surface field (the first spinbutton under Surface)
+    - wait 2 seconds for results to update
+    - take a snapshot
+    - verify the result count changed and "Clear All" button appeared
+  assert:
+    snapshot_contains: ["results", "Clear All"]
+
+- id: filter-date-range-ui
+  phase: functional
+  description: "Set a date_from filter, verify results update"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - find the first date input under "Transaction Date" section
+    - fill the date_from input with "2024-06-01"
+    - wait 2 seconds for results to update
+    - take a snapshot
+    - verify "Clear All" button appeared indicating an active filter
+  assert:
+    snapshot_contains: ["results", "Clear All"]
+
+- id: map-markers-loaded
+  phase: functional
+  description: "Verify the map renders with clickable warehouse markers after initial load"
+  steps:
+    - navigate to /
+    - wait for page to load and for markers to appear on the map
+    - take a snapshot
+    - verify at least one "Marker" button is present and zoom controls are visible
+  assert:
+    snapshot_contains: ["Marker", "Zoom in", "Zoom out"]
+
+- id: combined-filters-ui
+  phase: functional
+  description: "Apply department + commune filters simultaneously, verify compound filtering works"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - select department "59" from the department dropdown
+    - wait 2 seconds
+    - type "Lille" in the commune search input
+    - wait 2 seconds for results to update
+    - take a snapshot
+    - verify both filters are applied (department shows "59", commune input contains "Lille")
+  assert:
+    snapshot_contains: ["results"]
+
+- id: heatmap-legend-visible
+  phase: functional
+  description: "Toggle to heatmap mode, verify the color legend with Avg. Price / m² appears"
+  steps:
+    - navigate to /
+    - wait for page to load
+    - click the "Pins | Switch to Heatmap" toggle button
+    - wait 3 seconds for heatmap data and GeoJSON to load
+    - take a snapshot
+    - verify the legend shows "Avg. Price / m²" and the toggle now says "Heatmap"
+  assert:
+    snapshot_contains: ["Heatmap", "Switch to Pins"]
+
+- id: analytics-communes-names
+  phase: functional
+  description: "Verify analytics page shows actual commune names in the Top Communes chart"
+  steps:
+    - navigate to /analytics
+    - wait for page to fully load (all charts)
+    - take a snapshot
+    - verify commune names from the most expensive and most affordable lists are visible
+  assert:
+    snapshot_contains: ["Most Expensive", "Most Affordable", "Boulogne-Billancourt"]
